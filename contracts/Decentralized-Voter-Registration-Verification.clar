@@ -8,6 +8,12 @@
 (define-constant ERR_ALREADY_VERIFIED (err u106))
 (define-constant ERR_INVALID_PROOF (err u107))
 
+(define-constant ERR_DELEGATION_EXISTS (err u200))
+(define-constant ERR_DELEGATION_NOT_FOUND (err u201))
+(define-constant ERR_DELEGATION_EXPIRED (err u202))
+(define-constant ERR_INVALID_DELEGATE (err u203))
+(define-constant ERR_SELF_DELEGATION (err u204))
+
 (define-map voters 
   { voter-id: (buff 32) }
   { 
@@ -191,4 +197,98 @@
     voter-data (get verification-block voter-data)
     none
   )
+)
+
+
+(define-map voter-delegations
+  { delegator: (buff 32) }
+  { 
+    delegate: (buff 32),
+    delegation-proof: (buff 32),
+    expiry-block: uint,
+    created-block: uint,
+    active: bool
+  }
+)
+
+(define-map delegation-authorizations
+  { delegate: (buff 32), delegator: (buff 32) }
+  { authorized: bool, authorization-block: uint }
+)
+
+(define-data-var total-delegations uint u0)
+
+(define-public (create-delegation (delegator-id (buff 32)) (delegate-id (buff 32)) 
+                                 (delegation-proof (buff 32)) (duration uint))
+  (let 
+    (
+      (delegator-data (unwrap! (map-get? voters { voter-id: delegator-id }) ERR_NOT_REGISTERED))
+      (delegate-data (unwrap! (map-get? voters { voter-id: delegate-id }) ERR_NOT_REGISTERED))
+      (current-block stacks-block-height)
+      (expiry-block (+ current-block duration))
+      (existing-delegation (map-get? voter-delegations { delegator: delegator-id }))
+    )
+    (asserts! (get verified delegator-data) ERR_UNAUTHORIZED)
+    (asserts! (get verified delegate-data) ERR_INVALID_DELEGATE)
+    (asserts! (not (is-eq delegator-id delegate-id)) ERR_SELF_DELEGATION)
+    (asserts! (is-none existing-delegation) ERR_DELEGATION_EXISTS)
+    (map-set voter-delegations
+      { delegator: delegator-id }
+      {
+        delegate: delegate-id,
+        delegation-proof: delegation-proof,
+        expiry-block: expiry-block,
+        created-block: current-block,
+        active: true
+      }
+    )
+    (map-set delegation-authorizations
+      { delegate: delegate-id, delegator: delegator-id }
+      { authorized: true, authorization-block: current-block }
+    )
+    (var-set total-delegations (+ (var-get total-delegations) u1))
+    (ok true)
+  )
+)
+
+(define-public (revoke-delegation (delegator-id (buff 32)))
+  (let 
+    (
+      (delegation-data (unwrap! (map-get? voter-delegations { delegator: delegator-id }) ERR_DELEGATION_NOT_FOUND))
+    )
+    (map-set voter-delegations
+      { delegator: delegator-id }
+      (merge delegation-data { active: false })
+    )
+    (map-delete delegation-authorizations
+      { delegate: (get delegate delegation-data), delegator: delegator-id }
+    )
+    (ok true)
+  )
+)
+
+(define-read-only (get-delegation-info (delegator-id (buff 32)))
+  (map-get? voter-delegations { delegator: delegator-id })
+)
+
+(define-read-only (is-delegation-valid (delegator-id (buff 32)))
+  (match (map-get? voter-delegations { delegator: delegator-id })
+    delegation-data 
+      (and 
+        (get active delegation-data)
+        (< stacks-block-height (get expiry-block delegation-data))
+      )
+    false
+  )
+)
+
+(define-read-only (verify-delegate-authorization (delegate-id (buff 32)) (delegator-id (buff 32)))
+  (default-to 
+    { authorized: false, authorization-block: u0 }
+    (map-get? delegation-authorizations { delegate: delegate-id, delegator: delegator-id })
+  )
+)
+
+(define-read-only (get-total-delegations)
+  (var-get total-delegations)
 )
