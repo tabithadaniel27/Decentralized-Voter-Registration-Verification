@@ -292,3 +292,94 @@
 (define-read-only (get-total-delegations)
   (var-get total-delegations)
 )
+
+(define-map participation-metrics
+  { election-id: uint }
+  {
+    total-registrations: uint,
+    peak-registration-block: uint,
+    peak-registration-count: uint,
+    average-registration-rate: uint,
+    participation-score: uint
+  }
+)
+
+(define-map time-period-analytics
+  { period-start: uint, period-end: uint }
+  {
+    total-elections: uint,
+    total-participants: uint,
+    average-participation-rate: uint,
+    peak-activity-block: uint
+  }
+)
+
+(define-data-var analytics-enabled bool true)
+(define-data-var total-participation-events uint u0)
+
+(define-public (record-participation-event (election-id uint))
+  (let
+    (
+      (election-data (unwrap! (map-get? elections { election-id: election-id }) ERR_ELECTION_NOT_FOUND))
+      (current-metrics (default-to 
+        { total-registrations: u0, peak-registration-block: u0, peak-registration-count: u0, 
+          average-registration-rate: u0, participation-score: u0 }
+        (map-get? participation-metrics { election-id: election-id })))
+      (current-block stacks-block-height)
+      (new-total (+ (get total-registrations current-metrics) u1))
+      (is-peak (> new-total (get peak-registration-count current-metrics)))
+    )
+    (asserts! (var-get analytics-enabled) (ok true))
+    (map-set participation-metrics
+      { election-id: election-id }
+      {
+        total-registrations: new-total,
+        peak-registration-block: (if is-peak current-block (get peak-registration-block current-metrics)),
+        peak-registration-count: (if is-peak new-total (get peak-registration-count current-metrics)),
+        average-registration-rate: (/ new-total (- current-block (get start-block election-data))),
+        participation-score: (/ (* new-total u100) (get total-registered election-data))
+      }
+    )
+    (var-set total-participation-events (+ (var-get total-participation-events) u1))
+    (ok true)
+  )
+)
+
+(define-public (update-period-analytics (period-start uint) (period-end uint))
+  (let
+    (
+      (existing-analytics (default-to 
+        { total-elections: u0, total-participants: u0, average-participation-rate: u0, peak-activity-block: u0 }
+        (map-get? time-period-analytics { period-start: period-start, period-end: period-end })))
+      (new-participants (+ (get total-participants existing-analytics) u1))
+    )
+    (asserts! (var-get analytics-enabled) (ok true))
+    (map-set time-period-analytics
+      { period-start: period-start, period-end: period-end }
+      (merge existing-analytics {
+        total-participants: new-participants,
+        average-participation-rate: (/ new-participants (- period-end period-start))
+      })
+    )
+    (ok true)
+  )
+)
+
+(define-read-only (get-participation-metrics (election-id uint))
+  (map-get? participation-metrics { election-id: election-id })
+)
+
+(define-read-only (get-period-analytics (period-start uint) (period-end uint))
+  (map-get? time-period-analytics { period-start: period-start, period-end: period-end })
+)
+
+(define-read-only (calculate-engagement-ratio (election-id uint))
+  (match (map-get? participation-metrics { election-id: election-id })
+    metrics (/ (* (get participation-score metrics) u100) u100)
+    u0
+  )
+)
+
+(define-read-only (get-total-participation-events)
+  (var-get total-participation-events)
+)
