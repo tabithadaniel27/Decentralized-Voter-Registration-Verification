@@ -14,6 +14,13 @@
 (define-constant ERR_INVALID_DELEGATE (err u203))
 (define-constant ERR_SELF_DELEGATION (err u204))
 
+(define-constant ERR_VERIFIER_NOT_AUTHORIZED (err u300))
+(define-constant ERR_VERIFIER_ALREADY_EXISTS (err u301))
+(define-constant ERR_VERIFICATION_REQUEST_NOT_FOUND (err u302))
+(define-constant ERR_THRESHOLD_NOT_MET (err u303))
+(define-constant ERR_ALREADY_SIGNED (err u304))
+(define-constant ERR_VERIFICATION_ALREADY_COMPLETE (err u305))
+
 (define-map voters 
   { voter-id: (buff 32) }
   { 
@@ -382,4 +389,131 @@
 
 (define-read-only (get-total-participation-events)
   (var-get total-participation-events)
+)
+
+
+(define-map authorized-verifiers
+  { verifier: principal }
+  { verifier-key: (buff 33), authorized: bool, authorization-block: uint }
+)
+
+(define-map verification-requests
+  { request-id: uint }
+  { 
+    voter-id: (buff 32),
+    required-signatures: uint,
+    current-signatures: uint,
+    verification-hash: (buff 32),
+    completed: bool,
+    request-block: uint
+  }
+)
+
+(define-map verifier-signatures
+  { request-id: uint, verifier: principal }
+  { signature-hash: (buff 32), signature-block: uint }
+)
+
+(define-data-var request-counter uint u0)
+(define-data-var total-verifiers uint u0)
+
+(define-public (authorize-verifier (verifier principal) (verifier-key (buff 33)))
+  (let
+    (
+      (current-block stacks-block-height)
+      (existing-verifier (map-get? authorized-verifiers { verifier: verifier }))
+    )
+    (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
+    (asserts! (is-none existing-verifier) ERR_VERIFIER_ALREADY_EXISTS)
+    (map-set authorized-verifiers
+      { verifier: verifier }
+      { verifier-key: verifier-key, authorized: true, authorization-block: current-block }
+    )
+    (var-set total-verifiers (+ (var-get total-verifiers) u1))
+    (ok true)
+  )
+)
+
+(define-public (create-multisig-verification-request (voter-id (buff 32)) (verification-hash (buff 32)) (required-sigs uint))
+  (let
+    (
+      (voter-data (unwrap! (map-get? voters { voter-id: voter-id }) ERR_NOT_REGISTERED))
+      (request-id (+ (var-get request-counter) u1))
+      (current-block stacks-block-height)
+    )
+    (asserts! (not (get verified voter-data)) ERR_ALREADY_VERIFIED)
+    (map-set verification-requests
+      { request-id: request-id }
+      {
+        voter-id: voter-id,
+        required-signatures: required-sigs,
+        current-signatures: u0,
+        verification-hash: verification-hash,
+        completed: false,
+        request-block: current-block
+      }
+    )
+    (var-set request-counter request-id)
+    (ok request-id)
+  )
+)
+
+(define-public (submit-verifier-signature (request-id uint) (signature-hash (buff 32)))
+  (let
+    (
+      (verifier-data (unwrap! (map-get? authorized-verifiers { verifier: tx-sender }) ERR_VERIFIER_NOT_AUTHORIZED))
+      (request-data (unwrap! (map-get? verification-requests { request-id: request-id }) ERR_VERIFICATION_REQUEST_NOT_FOUND))
+      (existing-signature (map-get? verifier-signatures { request-id: request-id, verifier: tx-sender }))
+      (current-block stacks-block-height)
+      (new-sig-count (+ (get current-signatures request-data) u1))
+      (threshold-met (>= new-sig-count (get required-signatures request-data)))
+    )
+    (asserts! (get authorized verifier-data) ERR_VERIFIER_NOT_AUTHORIZED)
+    (asserts! (is-none existing-signature) ERR_ALREADY_SIGNED)
+    (asserts! (not (get completed request-data)) ERR_VERIFICATION_ALREADY_COMPLETE)
+    (map-set verifier-signatures
+      { request-id: request-id, verifier: tx-sender }
+      { signature-hash: signature-hash, signature-block: current-block }
+    )
+    (map-set verification-requests
+      { request-id: request-id }
+      (merge request-data { 
+        current-signatures: new-sig-count,
+        completed: threshold-met
+      })
+    )
+    (if threshold-met
+      (map-set voters
+        { voter-id: (get voter-id request-data) }
+        (merge (unwrap-panic (map-get? voters { voter-id: (get voter-id request-data) }))
+          { verified: true, verification-block: (some current-block) }
+        )
+      )
+      true
+    )
+    (ok threshold-met)
+  )
+)
+
+(define-read-only (get-verifier-info (verifier principal))
+  (map-get? authorized-verifiers { verifier: verifier })
+)
+
+(define-read-only (get-verification-request (request-id uint))
+  (map-get? verification-requests { request-id: request-id })
+)
+
+(define-read-only (get-verifier-signature (request-id uint) (verifier principal))
+  (map-get? verifier-signatures { request-id: request-id, verifier: verifier })
+)
+
+(define-read-only (is-verification-complete (request-id uint))
+  (match (map-get? verification-requests { request-id: request-id })
+    request-data (get completed request-data)
+    false
+  )
+)
+
+(define-read-only (get-total-verifiers)
+  (var-get total-verifiers)
 )
