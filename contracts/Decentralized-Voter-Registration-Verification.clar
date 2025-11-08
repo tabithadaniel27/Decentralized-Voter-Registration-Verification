@@ -21,6 +21,11 @@
 (define-constant ERR_ALREADY_SIGNED (err u304))
 (define-constant ERR_VERIFICATION_ALREADY_COMPLETE (err u305))
 
+(define-constant ERR_ROTATION_TOO_FREQUENT (err u400))
+(define-constant ERR_ROTATION_UNAUTHORIZED (err u401))
+(define-constant ERR_INVALID_NEW_CREDENTIAL (err u402))
+(define-constant ROTATION_COOLDOWN_PERIOD u144)
+
 (define-map voters 
   { voter-id: (buff 32) }
   { 
@@ -516,4 +521,81 @@
 
 (define-read-only (get-total-verifiers)
   (var-get total-verifiers)
+)
+
+(define-map credential-history
+  { voter-id: (buff 32), rotation-index: uint }
+  {
+    previous-hash: (buff 32),
+    new-hash: (buff 32),
+    rotation-block: uint,
+    rotation-reason: (string-ascii 30)
+  }
+)
+
+(define-map voter-rotation-metadata
+  { voter-id: (buff 32) }
+  {
+    total-rotations: uint,
+    last-rotation-block: uint,
+    rotation-enabled: bool
+  }
+)
+
+(define-data-var total-credential-rotations uint u0)
+
+(define-public (rotate-voter-credential (voter-id (buff 32)) (new-identity-hash (buff 32)) 
+                                         (authorization-proof (buff 32)) (reason (string-ascii 30)))
+  (let
+    (
+      (voter-data (unwrap! (map-get? voters { voter-id: voter-id }) ERR_NOT_REGISTERED))
+      (rotation-metadata (default-to 
+        { total-rotations: u0, last-rotation-block: u0, rotation-enabled: true }
+        (map-get? voter-rotation-metadata { voter-id: voter-id })))
+      (current-block stacks-block-height)
+      (blocks-since-last (- current-block (get last-rotation-block rotation-metadata)))
+      (rotation-index (+ (get total-rotations rotation-metadata) u1))
+      (old-hash (get identity-hash voter-data))
+    )
+    (asserts! (is-eq (get identity-hash voter-data) authorization-proof) ERR_ROTATION_UNAUTHORIZED)
+    (asserts! (not (is-eq old-hash new-identity-hash)) ERR_INVALID_NEW_CREDENTIAL)
+    (asserts! (or (is-eq (get total-rotations rotation-metadata) u0) 
+                  (>= blocks-since-last ROTATION_COOLDOWN_PERIOD)) ERR_ROTATION_TOO_FREQUENT)
+    (asserts! (get rotation-enabled rotation-metadata) ERR_UNAUTHORIZED)
+    (map-set credential-history
+      { voter-id: voter-id, rotation-index: rotation-index }
+      {
+        previous-hash: old-hash,
+        new-hash: new-identity-hash,
+        rotation-block: current-block,
+        rotation-reason: reason
+      }
+    )
+    (map-set voter-rotation-metadata
+      { voter-id: voter-id }
+      {
+        total-rotations: rotation-index,
+        last-rotation-block: current-block,
+        rotation-enabled: true
+      }
+    )
+    (map-set voters
+      { voter-id: voter-id }
+      (merge voter-data { identity-hash: new-identity-hash })
+    )
+    (var-set total-credential-rotations (+ (var-get total-credential-rotations) u1))
+    (ok rotation-index)
+  )
+)
+
+(define-read-only (get-credential-history (voter-id (buff 32)) (rotation-index uint))
+  (map-get? credential-history { voter-id: voter-id, rotation-index: rotation-index })
+)
+
+(define-read-only (get-rotation-metadata (voter-id (buff 32)))
+  (map-get? voter-rotation-metadata { voter-id: voter-id })
+)
+
+(define-read-only (get-total-credential-rotations)
+  (var-get total-credential-rotations)
 )
